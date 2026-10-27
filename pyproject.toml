@@ -1,0 +1,16 @@
+[project]
+name = "satwx"
+version = "0.1.0"
+description = "Weather-pattern classification of GOES ABI imagery with calibrated class probabilities"
+requires-python = ">=3.10"
+dependencies = ["numpy", "netCDF4", "pandas", "pillow", "torch", "torchvision"]
+
+[project.scripts]
+classify = "satwx.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["satwx"]
