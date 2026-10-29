@@ -21,13 +21,17 @@ def build_resnet18(in_ch: int, n_classes: int, pretrained: bool = True) -> nn.Mo
 
 
 class Classifier:
-    """Bundles network, input normalisation and calibration temperature."""
+    """Bundles network, input normalisation, calibration temperature and an optional prior-shift offset.
 
-    def __init__(self, net, classes, channels, mean, std, temperature=1.0):
+    p = softmax(logits / temperature + logit_bias)
+    """
+
+    def __init__(self, net, classes, channels, mean, std, temperature=1.0, logit_bias=None):
         self.net, self.classes, self.channels = net.eval(), list(classes), list(channels)
         self.mean = np.asarray(mean, np.float32).reshape(-1, 1, 1)
         self.std = np.asarray(std, np.float32).reshape(-1, 1, 1)
         self.temperature = float(temperature)
+        self.logit_bias = np.zeros(len(self.classes)) if logit_bias is None else np.asarray(logit_bias, float)
 
     def normalise(self, x: np.ndarray) -> np.ndarray:
         return (np.asarray(x, np.float32) - self.mean) / self.std
@@ -40,20 +44,23 @@ class Classifier:
             out.append(self.net(torch.from_numpy(self.normalise(x[i:i + batch]))).numpy())
         return np.concatenate(out)
 
+    def calibrated(self, logits: np.ndarray) -> np.ndarray:
+        return softmax(logits / self.temperature + self.logit_bias)
+
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        return softmax(self.logits(x) / self.temperature)
+        return self.calibrated(self.logits(x))
 
     def save(self, path: str | Path, **extra):
         torch.save(dict(state=self.net.state_dict(), classes=self.classes, channels=self.channels,
                         mean=self.mean.ravel().tolist(), std=self.std.ravel().tolist(),
-                        temperature=self.temperature, **extra), path)
+                        temperature=self.temperature, logit_bias=self.logit_bias.tolist(), **extra), path)
 
     @classmethod
     def load(cls, path: str | Path) -> "Classifier":
         ck = torch.load(path, map_location="cpu", weights_only=False)
         net = build_resnet18(len(ck["channels"]), len(ck["classes"]), pretrained=False)
         net.load_state_dict(ck["state"])
-        return cls(net, ck["classes"], ck["channels"], ck["mean"], ck["std"], ck["temperature"])
+        return cls(net, ck["classes"], ck["channels"], ck["mean"], ck["std"], ck["temperature"], ck.get("logit_bias"))
 
 
 def softmax(z: np.ndarray) -> np.ndarray:

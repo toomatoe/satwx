@@ -4,7 +4,9 @@ Bucket layout: s3://noaa-goes19/<product>/<YYYY>/<DOY>/<HH>/OR_<product>-M6..._s
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
 import os
 import re
 import urllib.parse
@@ -57,13 +59,19 @@ def _hour_prefix(product: str, t: dt.datetime) -> str:
 
 
 def find_key(satellite: str, product: str, t: dt.datetime, band: str | None = None,
-             max_offset_min: float = 15) -> str:
-    """Key of the scan of `product` (optionally one band) whose start time is nearest `t`."""
+             max_offset_min: float = 15, same_scan_as: str | None = None) -> str:
+    """Key of the scan of `product` (optionally one band) whose start time is nearest `t`.
+    With `same_scan_as`, only a file from exactly that scan (same start time) is accepted."""
     keys = []
     for dh in (-1, 0, 1):
         keys += list_keys(satellite, _hour_prefix(product, t + dt.timedelta(hours=dh)))
     if band:
         keys = [k for k in keys if f"M6{band}_" in k or f"M3{band}_" in k or f"M4{band}_" in k]
+    if same_scan_as:
+        sid = _START_RE.search(same_scan_as)[0]
+        keys = [k for k in keys if _START_RE.search(k)[0] == sid]
+        if not keys:
+            raise FileNotFoundError(f"{product} {band or ''} for scan {sid[2:]} is not (yet) in {satellite}")
     if not keys:
         raise FileNotFoundError(f"no {product} {band or ''} files near {t} in {satellite}")
     best = min(keys, key=lambda k: abs((scan_start(k) - t).total_seconds()))
@@ -178,3 +186,79 @@ def read_glm_flashes(path: Path) -> tuple[np.ndarray, np.ndarray]:
             return np.empty(0, np.float32), np.empty(0, np.float32)
         return (np.asarray(ds.variables["flash_lat"][:], np.float32),
                 np.asarray(ds.variables["flash_lon"][:], np.float32))
+
+
+# ---------------------------------------------------------------- remote windowed reads (HTTP range requests)
+
+class RangeFile(io.RawIOBase):
+    """Read-only, seekable file over HTTP range requests with a block cache, for h5py."""
+
+    def __init__(self, url: str, block: int = 1 << 18):
+        self.url, self.block, self.pos, self.cache = url, block, 0, {}
+        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
+            self.size = int(r.headers["Content-Length"])
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        self.pos = {io.SEEK_SET: 0, io.SEEK_CUR: self.pos, io.SEEK_END: self.size}[whence] + offset
+        return self.pos
+
+    def _block(self, i: int) -> bytes:
+        if i not in self.cache:
+            lo, hi = i * self.block, min(self.size, (i + 1) * self.block) - 1
+            req = urllib.request.Request(self.url, headers={"Range": f"bytes={lo}-{hi}"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                self.cache[i] = r.read()
+        return self.cache[i]
+
+    def readinto(self, buf) -> int:
+        n = max(0, min(len(buf), self.size - self.pos))
+        out = bytearray()
+        while len(out) < n:
+            i, off = divmod(self.pos + len(out), self.block)
+            out += self._block(i)[off:off + n - len(out)]
+        buf[:n] = out
+        self.pos += n
+        return n
+
+
+@contextlib.contextmanager
+def open_remote(satellite: str, key: str):
+    """h5py view of a bucket object; only the byte ranges actually read are downloaded."""
+    import h5py
+
+    f = RangeFile(f"{bucket(satellite)}/{key}")
+    h = h5py.File(f, "r")
+    try:
+        yield h
+    finally:  # close h5py before the file object, or HDF5 can crash at interpreter exit
+        h.close()
+        f.close()
+
+
+def _scaled(var, sel=()) -> np.ndarray:
+    raw = var[sel] if sel else var[()]
+    out = raw.astype(np.float64)
+    fill = var.attrs.get("_FillValue")
+    if fill is not None:
+        out[raw == np.asarray(fill).ravel()[0]] = np.nan
+    out = out * var.attrs.get("scale_factor", [1.0])[0] + var.attrs.get("add_offset", [0.0])[0]
+    return out
+
+
+def grid_from_h5(h) -> FixedGrid:
+    p = h["goes_imager_projection"].attrs
+    return FixedGrid(float(p["longitude_of_projection_origin"][0]), float(p["perspective_point_height"][0]),
+                     float(p["semi_major_axis"][0]), float(p["semi_minor_axis"][0]), _scaled(h["x"]), _scaled(h["y"]))
+
+
+def read_window(h, var: str, r0: int, c0: int, size: int) -> np.ndarray:
+    return _scaled(h[var], (slice(r0, r0 + size), slice(c0, c0 + size))).astype(np.float32)

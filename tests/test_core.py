@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 
 import numpy as np
 import pytest
@@ -117,3 +118,72 @@ def test_temperature_scaling_fixes_overconfidence():
     t = fit_temperature(logits, y)
     assert t > 2
     assert expected_calibration_error(softmax(logits / t), y) < expected_calibration_error(softmax(logits), y) / 2
+
+
+def test_cli_on_npy_tile(tmp_path, capsys):
+    import json
+    from satwx import cli
+
+    rng = np.random.default_rng(0)
+    np.save(tmp_path / "t.npy", (rng.normal(285, 3, (4, 64, 64))).astype(np.float32))
+    cli.main([str(tmp_path / "t.npy"), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert set(out["probabilities"]) == set(labels.CLASSES)
+    assert abs(sum(out["probabilities"].values()) - 1) < 1e-3
+    assert out["model"] == "satwx_ir4.pt" and out["prediction"] == max(out["probabilities"], key=out["probabilities"].get)
+
+
+def test_cli_rejects_wrong_shape(tmp_path):
+    from satwx import cli
+
+    np.save(tmp_path / "bad.npy", np.zeros((4, 32, 32), np.float32))
+    with pytest.raises(SystemExit):
+        cli.main([str(tmp_path / "bad.npy")])
+
+
+@pytest.mark.skipif(not os.environ.get("SATWX_NETWORK_TESTS"), reason="set SATWX_NETWORK_TESTS=1 (downloads ~25 MB)")
+def test_remote_window_matches_full_file(tmp_path):
+    from satwx.fetch import fetch_tile
+    from satwx.scene import TILE, model_input
+
+    t = dt.datetime(2025, 10, 28, 12)
+    x, meta = fetch_tile(17.5, -78.1, t, "goes19")
+    key = goes.find_key("goes19", "ABI-L2-CMIPF", t, "C13")
+    full, _ = goes.read_var(goes.download("goes19", key, tmp_path), "CMI")
+    r0, c0 = meta["row"], meta["col"]
+    ref = model_input(full[None, r0:r0 + TILE, c0:c0 + TILE])[0]
+    assert np.allclose(x[2], ref, atol=1e-3)
+
+
+def test_codsus_front_ends_at_next_bulletin_header():
+    text = CODSUS + "$$\n000\nASUS02 KWBC 080600\nCODSUS\n1223 AM EDT MON SEP 08 2025\n"
+    (_, fronts), = ancillary.parse_codsus(text).items()
+    warm = fronts[-1][1]
+    assert warm.shape == (2, 2) and (warm[:, 1] > -180).all()
+
+
+def test_codsus_year_rolls_over_on_new_year():
+    text = "ASUS01 KWBC 010300\nCODSUS\n1000 PM EST WED DEC 31 2025\n\nVALID 010100Z\nCOLD 3380 3381\n"
+    assert list(ancillary.parse_codsus(text)) == [dt.datetime(2026, 1, 1, 0)]
+
+
+def test_cyclone_interpolation_across_dateline():
+    import pandas as pd
+
+    t0 = dt.datetime(2025, 9, 1, 0)
+    tracks = pd.DataFrame(dict(SID=["X", "X"], NAME=["T", "T"], NATURE=["TS", "TS"], LAT=[20.0, 20.0],
+                               LON=[179.0, -179.0], WIND=[50.0, 50.0],
+                               ISO_TIME=pd.to_datetime([t0, t0 + dt.timedelta(hours=6)])))
+    (tc,) = ancillary.cyclones_at(tracks, t0 + dt.timedelta(hours=3))
+    assert abs(tc["lon"] - 180.0) < 1e-6
+
+
+def test_split_has_gaps_around_held_out_blocks():
+    import sys
+    sys.path.insert(0, "scripts")
+    from train import split_of
+
+    day = lambda d, suffix="": split_of(f"goes19_{(dt.datetime(2025, 6, 1) + dt.timedelta(days=d)):%Y%m%dT%H%M}{suffix}")
+    assert day(0) == "train" and day(50) == "val" and day(70) == "test"
+    assert day(46) == "gap" and day(81) == "gap"          # 2 days before val, 1 day after test
+    assert day(40) == "train" and day(40, "_tc") == "gap"  # 8 days before val: ok for regular, not for TC scenes

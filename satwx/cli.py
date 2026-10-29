@@ -32,7 +32,6 @@ def main(argv=None):
     ap.add_argument("--satellite", choices=["goes18", "goes19"], help="default: chosen from --lon")
     ap.add_argument("--model", type=Path, help="checkpoint (default: models/satwx_ir4.pt, or satwx_ir1.pt for PNG)")
     ap.add_argument("--save-tile", type=Path, help="with --lat/--lon/--time: also write the fetched tile (.npy or .png)")
-    ap.add_argument("--cache", type=Path, default=Path(os.environ.get("SATWX_CACHE", "data/cache")))
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
@@ -43,11 +42,16 @@ def main(argv=None):
     if a.image:
         if a.image.suffix.lower() == ".npy":
             x = np.load(a.image).astype(np.float32)
+            if x.ndim != 3 or x.shape[1:] != (64, 64):
+                ap.error(f"{a.image}: expected a (channels, 64, 64) array, got {x.shape}")
         else:
             x = png_to_bt(a.image)
         meta["input"] = str(a.image)
     elif None not in (a.lat, a.lon, a.time):
-        x, meta = fetch_tile(a.lat, a.lon, a.time, a.satellite, a.cache)
+        try:
+            x, meta = fetch_tile(a.lat, a.lon, a.time, a.satellite)
+        except (ValueError, FileNotFoundError) as e:
+            ap.exit(2, f"classify: {e}\n")
         meta.update(lat=a.lat, lon=a.lon, requested_time=a.time.isoformat())
         if a.save_tile:
             np.save(a.save_tile, x) if a.save_tile.suffix == ".npy" else bt_to_png(x[2], a.save_tile)

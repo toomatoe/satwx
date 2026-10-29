@@ -9,8 +9,8 @@ $ classify --lat 17.5 --lon -78.1 --time 2025-10-28T12:00      # Hurricane Melis
       satellite: goes19
      scan_start: 2025-10-28T12:00:20
           model: satwx_ir4.pt
- tropical_cyclone  0.992 ########################################
- convective_storm  0.008
+ tropical_cyclone  0.996 ########################################
+ convective_storm  0.004
             other  0.000
             ...
 ```
@@ -42,11 +42,11 @@ labelled datasets and the state of the art.
    | other | anything else, including tiles with a little lightning |
 3. **Model.** ImageNet-pretrained ResNet-18 with its first convolution adapted to the IR channels, fine-tuned
    for 6 epochs on CPU (a 4-band model and a C13-only model) ([scripts/train.py](scripts/train.py)). Storm-centred tiles are oversampled for the
-   rare TC class, and a logit (prior) adjustment then restores the natural class frequencies.
-   **Temperature scaling** is fitted on validation scenes, so the probabilities are calibrated.
+   rare TC class. **Temperature scaling** is fitted on validation scenes, so the probabilities are calibrated.
 4. **Split.** The dataset runs from June 2025 to May 2026 (92 regular scenes every 4 days, plus 84 extra
-   TC-centred scenes). It is cut into 16-day blocks: every 5th block is validation and every 5th (offset) is
-   test. So test storms and weather regimes are never seen in training.
+   TC-centred scenes). It is cut into 16-day blocks cycling train, train, train, val, test. Training scenes
+   within 4 days of a held-out block are dropped, and training TC scenes within 12 days. So no storm and no
+   synoptic regime appears in both training and evaluation.
 
 A second model, `satwx_ir1.pt`, uses only C13. That lets `classify image.png` work on a single greyscale IR
 image.
@@ -55,46 +55,51 @@ image.
 
 The test set is 39 GOES-19 scenes from 5 held-out 16-day blocks: Aug 4–19 2025, Oct 23–Nov 7 2025,
 Jan 2026 and Apr 2026. It holds 18,448 tiles on the regular grid plus 339 storm-centred tiles from 6 storms
-(Erin, Melissa, Dexter, Henriette, Ivo, Sonia). The full numbers are in `models/*.metrics.json`.
+(Erin, Melissa, Dexter, Henriette, Ivo, Sonia). None of these storms appear in training. The full numbers
+are in `models/*.metrics.json`.
 
 | model | accuracy | macro-F1 | NLL | ECE (15 bins) | majority-class baseline |
 |---|---|---|---|---|---|
-| `satwx_ir4.pt` (C07, C08, C13, C15) | **0.816** | 0.636 | 0.461 | 0.009 | 0.558 |
-| `satwx_ir1.pt` (C13 only, used for PNG) | 0.784 | 0.593 | 0.544 | 0.009 | 0.558 |
+| `satwx_ir4.pt` (C07, C08, C13, C15) | **0.820** | 0.638 | 0.446 | 0.008 | 0.563 |
+| `satwx_ir1.pt` (C13 only, used for PNG) | 0.782 | 0.587 | 0.528 | 0.006 | 0.563 |
 
 Per class, for `satwx_ir4.pt` on test tiles. *mean P* is the average predicted probability, against the class's
 actual frequency:
 
 | class | precision | recall | F1 | support | freq | mean P |
 |---|---|---|---|---|---|---|
-| clear | 0.86 | 0.80 | 0.83 | 506 | 0.027 | 0.027 |
-| cumulus | 0.83 | 0.83 | 0.83 | 2726 | 0.148 | 0.147 |
-| stratiform | 0.65 | 0.63 | 0.64 | 427 | 0.023 | 0.026 |
-| low_stratus_fog | 0.86 | 0.88 | 0.87 | 1304 | 0.071 | 0.069 |
-| cirrus | 0.76 | 0.76 | 0.76 | 1789 | 0.097 | 0.094 |
-| convective_storm | 0.70 | 0.55 | 0.62 | 913 | 0.050 | 0.046 |
-| tropical_cyclone | 0.19 | 0.58 | 0.29 | 12 | 0.0007 | 0.0037 |
-| frontal_band | 0.53 | **0.02** | 0.03 | 469 | 0.025 | 0.027 |
-| other | 0.83 | 0.88 | 0.86 | 10302 | 0.558 | 0.560 |
+| clear | 0.84 | 0.83 | 0.83 | 506 | 0.027 | 0.029 |
+| cumulus | 0.82 | 0.84 | 0.83 | 2727 | 0.148 | 0.151 |
+| stratiform | 0.69 | 0.60 | 0.64 | 432 | 0.023 | 0.025 |
+| low_stratus_fog | 0.86 | 0.88 | 0.87 | 1307 | 0.071 | 0.070 |
+| cirrus | 0.76 | 0.80 | 0.78 | 1815 | 0.098 | 0.102 |
+| convective_storm | 0.70 | 0.53 | 0.60 | 913 | 0.050 | 0.046 |
+| tropical_cyclone | 0.23 | 0.50 | 0.32 | 12 | 0.0007 | 0.0032 |
+| frontal_band | 0.57 | **0.01** | 0.02 | 358 | 0.019 | 0.018 |
+| other | 0.84 | 0.87 | 0.86 | 10378 | 0.563 | 0.557 |
 
-**Storm-centred test tiles** (339 tiles within 80 km of a best-track centre): tropical-cyclone recall is 0.70
-and precision 0.99. The misses go to `convective_storm` or `other`, and are mostly weak or sheared storms.
+**Storm-centred test tiles** (339 tiles within 80 km of a best-track centre): tropical-cyclone recall is 0.60
+and precision 0.99. Of the misses, 91 go to `other` and 47 to `convective_storm`. They are mostly weak,
+sheared or landfalling storms.
 
 How to read these:
-* The model is already well calibrated after fine-tuning: the fitted temperature is T ≈ 0.96, and test ECE
-  is 0.005 before temperature scaling and 0.009 after. Class-wise mean probabilities match class frequencies
-  within about 10 %, except `tropical_cyclone`. That class was deliberately oversampled (storm-centred tiles),
-  so its probability on a *random* tile is about 5× too high. In exchange, a query at a storm's location gets
-  a useful TC probability. `scripts/train.py --prior-correction` gives the opposite trade-off: random-tile
-  calibration, but TC recall drops to about 0.2.
-* `frontal_band` is effectively not learned (recall 0.02). Its probability is still calibrated *as a base
+* The model is already well calibrated after fine-tuning: the fitted temperature is T ≈ 0.98, and test ECE
+  is 0.008 both before and after temperature scaling. Class-wise mean probabilities match class frequencies
+  within about 10 %, except `tropical_cyclone`. That class was deliberately oversampled (storm-centred
+  tiles), so its probability on a *random* tile is about 4–5× too high. In exchange, a query at a storm's
+  location gets a useful TC probability. `scripts/train.py --prior-correction` stores a logit offset that
+  gives the opposite trade-off: random-tile calibration, but far lower TC recall.
+* `frontal_band` is effectively not learned (recall 0.01). Its probability is still calibrated *as a base
   rate*, but the model cannot pick out fronts in a 256 km IR tile from these labels. See Limitations.
+* An earlier version of the split had no gap between training and held-out blocks, so Erin and Melissa
+  partly leaked into training. Removing that leak changed overall test accuracy by less than 0.5 points,
+  but lowered storm-centred TC recall from 0.70 to 0.60. The figures above are the leak-free ones.
 * Spot checks on real test-period imagery, from `classify --lat --lon --time`:
-  - Hurricane Melissa near Jamaica, 2025-10-28 12Z: `tropical_cyclone` 0.99. The same tile as PNG through the
-    C13-only model: 0.97.
+  - Hurricane Melissa near Jamaica, 2025-10-28 12Z: `tropical_cyclone` 0.996. The same tile as PNG through
+    the C13-only model: 0.99.
   - Peruvian stratocumulus deck (20°S 82°W): `low_stratus_fog` 0.92.
   - Northern Mexico desert, 2025-11-01 18Z: `clear` 0.99.
-  - Weak TS Sonia via GOES-18 (not trained on): `convective_storm` 0.64, `tropical_cyclone` 0.15.
+  - Weak TS Sonia via GOES-18 (not trained on): `convective_storm` 0.72, `tropical_cyclone` 0.06.
 
 ## Usage
 
@@ -113,9 +118,11 @@ docker run --rm -v "$PWD:/work" satwx /work/tile.png --json
 ```
 
 Inputs:
-* `--lat --lon --time`: downloads the nearest full-disk scan (4 bands, about 100 MB, about 20 s) from
-  `noaa-goes19` or, west of 106°W, `noaa-goes18`, and classifies the 256 km tile centred on the point.
-  `--save-tile tile.npy|tile.png` also keeps the tile.
+* `--lat --lon --time`: finds the nearest full-disk scan on `noaa-goes19` (or `noaa-goes18` west of
+  106°W). It reads only the bytes for the 256 km tile around the point with HTTP range requests (about 8 MB,
+  10–20 s), and classifies it. All four bands come from the same scan. Points off the disk or too close
+  to its edge are refused. Points beyond the training range (satellite zenith > 65°) get a warning in the
+  output. `--save-tile tile.npy|tile.png` also keeps the tile.
 * `tile.npy`: a `(4, 64, 64)` array of C07/C08/C13/C15 brightness temperatures in K (4 km pixels).
 * `tile.png`: 8-bit greyscale 10.3 µm IR, white = cold, linear from 0 → 330 K to 255 → 170 K, covering
   about 256 km. It is resized to 64×64 and classified with the C13-only model. The PNG must follow this
@@ -171,5 +178,8 @@ Layout: `satwx/goes.py` (S3 access, fixed-grid projection, readers), `satwx/scen
   than a tile are only partly seen.
 * **Calibration** comes from temperature scaling on validation scenes from the same year and satellite. It
   will degrade under distribution shift (another season, satellite, or a PNG with a different enhancement).
-* The `--lat/--lon/--time` path downloads whole full-disk band files (about 100 MB) per query. It is fine for
-  ad-hoc use, not for bulk inference.
+* **GLM flashes are placed with the surface ellipsoid** rather than GLM's lightning ellipsoid, which shifts
+  them about 10–30 km toward the limb. This only matters for flashes near tile edges, but it adds some noise
+  to the `convective_storm` / `other` boundary.
+* The `--lat/--lon/--time` path makes one query per scan and band (about 8 MB). That is fine for ad-hoc use;
+  for bulk inference, download whole scenes and tile them as `scripts/build_dataset.py` does.

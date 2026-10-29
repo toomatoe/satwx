@@ -29,9 +29,10 @@ class Scene:
 def load_scene(satellite: str, t: dt.datetime, cache_dir: Path, with_labels: bool = True,
                keep_files: bool = False) -> Scene:
     files = []
+    ref = goes.find_key(satellite, "ABI-L2-CMIPF", t, "C13")  # every band and product must be from this scan
 
     def get(product, band=None):
-        key = goes.find_key(satellite, product, t, band)
+        key = goes.find_key(satellite, product, t, band, same_scan_as=ref)
         p = goes.download(satellite, key, cache_dir)
         files.append(p)
         return key, p
@@ -63,17 +64,19 @@ def load_scene(satellite: str, t: dt.datetime, cache_dir: Path, with_labels: boo
     return scene
 
 
-def tile_origins(scene: Scene, extra_centers: list[tuple[float, float]] = ()) -> list[tuple[int, int]]:
-    """Regular non-overlapping tile grid plus tiles centred on given (lat, lon) points."""
+def tile_origins(scene: Scene, extra_centers: list[tuple[float, float]] = ()) -> tuple[list[tuple[int, int]], int]:
+    """Regular non-overlapping tile grid plus tiles centred on given (lat, lon) points.
+    Returns (origins, number of regular tiles); the extra tiles follow the regular ones."""
     n = scene.bands.shape[-1]
     origins = [(r, c) for r in range(0, n - TILE + 1, TILE) for c in range(0, n - TILE + 1, TILE)]
+    n_regular = len(origins)
     for lat, lon in extra_centers:
         r, c, vis = scene.grid.pixel(lat, lon)
         if vis:
             r0, c0 = int(round(float(r))) - TILE // 2, int(round(float(c))) - TILE // 2
             if 0 <= r0 <= n - TILE and 0 <= c0 <= n - TILE:
                 origins.append((r0, c0))
-    return origins
+    return origins, n_regular
 
 
 def tile_center(scene: Scene, r0: int, c0: int) -> tuple[float, float]:
@@ -87,13 +90,3 @@ def model_input(bt_tile: np.ndarray) -> np.ndarray:
     """(4, TILE, TILE) K -> (4, 64, 64) float32, mean-pooled."""
     c, h, w = bt_tile.shape
     return bt_tile.reshape(c, h // POOL, POOL, w // POOL, POOL).mean(axis=(2, 4)).astype(np.float32)
-
-
-def crop_at(scene: Scene, lat: float, lon: float) -> tuple[np.ndarray, int, int]:
-    r, c, vis = scene.grid.pixel(lat, lon)
-    if not vis:
-        raise ValueError(f"({lat}, {lon}) is not visible from {scene.satellite}")
-    n = scene.bands.shape[-1]
-    r0 = int(np.clip(round(float(r)) - TILE // 2, 0, n - TILE))
-    c0 = int(np.clip(round(float(c)) - TILE // 2, 0, n - TILE))
-    return scene.bands[:, r0:r0 + TILE, c0:c0 + TILE], r0, c0

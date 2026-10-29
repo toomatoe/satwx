@@ -18,9 +18,8 @@ ap.add_argument("--lon", type=float, required=True)
 ap.add_argument("--time", type=parse_time, required=True)
 ap.add_argument("--satellite", choices=["goes18", "goes19"])
 ap.add_argument("--out", type=Path, required=True)
-ap.add_argument("--cache", type=Path, default=Path("data/cache"))
 a = ap.parse_args()
-x, meta = fetch_tile(a.lat, a.lon, a.time, a.satellite, a.cache)
+x, meta = fetch_tile(a.lat, a.lon, a.time, a.satellite)
 if a.out.suffix == ".png":
     bt_to_png(x[2], a.out)
 else:

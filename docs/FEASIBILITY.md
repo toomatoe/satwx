@@ -51,8 +51,8 @@ labelling or weak supervision from physical products. This project uses weak sup
 ## 4. What was built (see README)
 
 GOES-19 full disk → 256 km tiles (4 IR bands, 64×64) → weak labels from ACM / ACTP / ACHA / GLM / IBTrACS / WPC
-fronts → ResNet-18 fine-tune → temperature scaling on validation scenes → evaluation on held-out scenes at
-least 4 days away from any training scene.
+fronts → ResNet-18 fine-tune → temperature scaling on validation scenes → evaluation on held-out 16-day blocks,
+separated from training by a 4-day gap (12 days for storm-centred scenes).
 
 ## Sources
 

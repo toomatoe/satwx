@@ -81,9 +81,9 @@ def build_one(satellite: str, t: dt.datetime, out_dir: Path, cache: Path, tc_onl
                     extra.append((float(la), float(lo)))
                 else:
                     extra.append((tc["lat"], tc["lon"]))
-    origins = tile_origins(sc, extra)
+    origins, n_regular = tile_origins(sc, extra)
     if tc_only:  # only the storm-centred tiles; the regular grid is covered by the regular scenes
-        origins = origins[len(origins) - len(extra):]
+        origins, n_regular = origins[n_regular:], 0
         if not origins:
             return f"{out.name}: no visible TC"
 
@@ -93,7 +93,6 @@ def build_one(satellite: str, t: dt.datetime, out_dir: Path, cache: Path, tc_onl
 
     hf = sc.height.shape[0] / sc.bands.shape[-1]
     X, y, feats, centers, is_extra = [], [], [], [], []
-    n_regular = len(origins) - len(extra)
     for i, (r0, c0) in enumerate(origins):
         bt = sc.bands[:, r0:r0 + TILE, c0:c0 + TILE]
         if not np.isfinite(bt).all():
@@ -110,7 +109,7 @@ def build_one(satellite: str, t: dt.datetime, out_dir: Path, cache: Path, tc_onl
         y.append(labels.label(f))
         feats.append(f)
         centers.append((lat, lon))
-        is_extra.append(tc_only or i >= n_regular)
+        is_extra.append(i >= n_regular)
 
     keys = list(feats[0])
     out_dir.mkdir(parents=True, exist_ok=True)

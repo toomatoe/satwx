@@ -1,7 +1,8 @@
 """Fine-tune ResNet-18 on the weakly labelled tiles, calibrate with temperature scaling, evaluate on held-out scenes.
 
-Split is by time block, never by tile: the year is cut into 16-day blocks and every 5th block goes to
-validation, every 5th (offset) to test. A storm or weather regime therefore rarely appears in two splits.
+Split is by time block, never by tile: the year is cut into 16-day blocks, cycling train / train / train / val /
+test. Training scenes within GAP_DAYS of a val or test block are dropped (TC scenes within TC_GAP_DAYS, since
+a storm lives up to ~2 weeks), so no storm and no synoptic regime spans the train/held-out boundary.
 
     python scripts/train.py --tiles data/tiles --out models/satwx_ir4.pt
     python scripts/train.py --tiles data/tiles --out models/satwx_ir1.pt --channels C13
@@ -23,17 +24,28 @@ from satwx.model import Classifier, build_resnet18, expected_calibration_error, 
 
 
 BLOCK_DAYS, EPOCH = 16, dt.datetime(2025, 6, 1)
+GAP_DAYS, TC_GAP_DAYS = 4, 12
+HELD_OUT = {3: "val", 4: "test"}  # block index mod 5
 
 
 def split_of(stem: str) -> str:
+    """'train', 'val', 'test' or 'gap' (unused) for a tile file stem like goes19_20250907T1800[_tc]."""
     t = dt.datetime.strptime(stem.split("_")[1], "%Y%m%dT%H%M")
-    block = (t - EPOCH).days // BLOCK_DAYS
-    return "val" if block % 5 == 3 else "test" if block % 5 == 4 else "train"
+    days = (t - EPOCH).total_seconds() / 86400
+    block = int(days // BLOCK_DAYS)
+    if block % 5 in HELD_OUT:
+        return HELD_OUT[block % 5]
+    gap = TC_GAP_DAYS if stem.endswith("_tc") else GAP_DAYS
+    pos = days - block * BLOCK_DAYS
+    near_prev = block > 0 and (block - 1) % 5 in HELD_OUT and pos < gap
+    near_next = (block + 1) % 5 in HELD_OUT and BLOCK_DAYS - pos < gap
+    return "gap" if near_prev or near_next else "train"
 
 
 def load_tiles(tile_dir: Path, channels: list[int]):
     files = sorted(tile_dir.glob("*.npz"))
     split = {f: split_of(f.stem) for f in files}
+    files = [f for f in files if split[f] != "gap"]
     out = {s: dict(X=[], y=[], extra=[], scene=[]) for s in ("train", "val", "test")}
     for f in files:
         d = np.load(f)
@@ -121,22 +133,21 @@ def main():
     # Storm-centred extra tiles over-represent TCs (~1.2 % of training tiles vs ~0.1 % of the regular grid).
     # Optionally undo that prior shift; by default keep it, since queries are usually about places with weather.
     # The temperature is fitted on regular validation tiles only.
-    if a.prior_correction:
-        with torch.no_grad():
-            net.fc.bias += torch.from_numpy(prior_adjustment(tr)).float()
     vreg = ~va["extra"]
     val_logits, test_logits = clf.logits(va["X"]), clf.logits(te["X"])
     clf.temperature = fit_temperature(val_logits[vreg], va["y"][vreg])
+    # Applied after the temperature (p = softmax(z / T + bias)) and stored, never baked into the weights.
+    clf.logit_bias = prior_adjustment(tr) if a.prior_correction else np.zeros(len(labels.CLASSES))
     # Jittered TC-centred tiles overlap each other; headline test metrics use the regular tile grid only.
     reg = ~te["extra"]
     metrics = dict(
         channels=chans, temperature=clf.temperature, prior_correction=a.prior_correction,
         split=dict(train_scenes=sorted(set(tr["scene"])), val_scenes=sorted(set(va["scene"])),
                    test_scenes=sorted(set(te["scene"]))),
-        val_calibrated=evaluate(softmax(val_logits[vreg] / clf.temperature), va["y"][vreg]),
+        val_calibrated=evaluate(clf.calibrated(val_logits[vreg]), va["y"][vreg]),
         test_uncalibrated=evaluate(softmax(test_logits[reg]), te["y"][reg]),
-        test_calibrated=evaluate(softmax(test_logits[reg] / clf.temperature), te["y"][reg]),
-        test_tc_centred_tiles=evaluate(softmax(test_logits[~reg] / clf.temperature), te["y"][~reg]) if (~reg).any() else None,
+        test_calibrated=evaluate(clf.calibrated(test_logits[reg]), te["y"][reg]),
+        test_tc_centred_tiles=evaluate(clf.calibrated(test_logits[~reg]), te["y"][~reg]) if (~reg).any() else None,
     )
     a.out.parent.mkdir(parents=True, exist_ok=True)
     clf.save(a.out, metrics={k: v for k, v in metrics.items() if k != "split"})

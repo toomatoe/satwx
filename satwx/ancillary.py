@@ -42,18 +42,23 @@ def cyclones_at(tracks: pd.DataFrame, t: dt.datetime, min_wind_kt: float = 34) -
         span = (b.ISO_TIME - a.ISO_TIME).total_seconds()
         w = 0.0 if span == 0 else (pd.Timestamp(t) - a.ISO_TIME).total_seconds() / span
         wind = np.fmax(a.WIND, b.WIND)
+        dlon = (b.LON - a.LON + 180) % 360 - 180  # tracks crossing the dateline
         if a.NATURE != "TS" or not wind >= min_wind_kt:
             continue
         out.append(dict(sid=sid, name=a.NAME, lat=a.LAT + w * (b.LAT - a.LAT),
-                        lon=a.LON + w * (b.LON - a.LON), wind_kt=float(wind)))
+                        lon=a.LON + w * dlon, wind_kt=float(wind)))
     return out
 
 
-def _coord(tok: str) -> tuple[float, float]:
-    # Low-res CODSUS points: LLooo / LLoo (deg N, deg W); high-res: LLLoooo (tenths).
-    if len(tok) == 7:
-        return int(tok[:3]) / 10, -int(tok[3:]) / 10
-    return float(tok[:2]), -float(tok[2:])
+def _coord(tok: str) -> tuple[float, float] | None:
+    """Low-res CODSUS point LLooo / LLoo (deg N, deg W) or high-res LLLoooo (tenths); None if not a point."""
+    if not tok.isdigit() or len(tok) not in (4, 5, 7):
+        return None
+    lat, lon = (int(tok[:3]) / 10, int(tok[3:]) / 10) if len(tok) == 7 else (float(tok[:2]), float(tok[2:]))
+    return (lat, -lon) if lat <= 90 and lon <= 180 else None
+
+
+_MONTHS = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()
 
 
 def parse_codsus(text: str) -> dict[dt.datetime, list[tuple[str, np.ndarray]]]:
@@ -61,22 +66,26 @@ def parse_codsus(text: str) -> dict[dt.datetime, list[tuple[str, np.ndarray]]]:
     out: dict[dt.datetime, list] = {}
     for block in re.split(r"(?=VALID \d{6}Z)", text)[1:]:
         m = re.match(r"VALID (\d{2})(\d{2})(\d{2})Z", block)
-        year = re.findall(r"\b(20\d{2})\b", text[: text.find(block)])
-        valid = dt.datetime(int(year[-1]) if year else dt.datetime.utcnow().year,
-                            int(m[1]), int(m[2]), int(m[3]))
+        # Issue date from the header ("... MON SEP 08 2025"); a Dec 31 bulletin can be valid on Jan 1.
+        hdr = re.findall(r"\b(%s) \d{1,2} (20\d{2})\b" % "|".join(_MONTHS), text[: text.find(block)])
+        year = int(hdr[-1][1]) if hdr else dt.datetime.utcnow().year
+        if hdr and hdr[-1][0] == "DEC" and int(m[1]) == 1:
+            year += 1
+        valid = dt.datetime(year, int(m[1]), int(m[2]), int(m[3]))
         fronts, cur = [], None
         for line in block.splitlines()[1:]:
             toks = line.split()
             if not toks:
                 continue
-            if toks[0].isalpha():
+            if toks[0] in FRONT_TYPES:
+                cur = (toks[0], [])
+                fronts.append(cur)
+                toks = toks[2:] if len(toks) > 1 and toks[1].isalpha() else toks[1:]  # skip WK/MDT/STG
+            pts = [_coord(t) for t in toks]
+            if cur is None or None in pts:  # any other line (HIGHS, TROF, next header, $$) ends the front
                 cur = None
-                if toks[0] in FRONT_TYPES:
-                    cur = (toks[0], [])
-                    fronts.append(cur)
-                    toks = toks[1:]
-            if cur is not None:
-                cur[1].extend(_coord(t) for t in toks if t.isdigit())
+                continue
+            cur[1].extend(pts)
         out[valid] = [(k, np.array(p)) for k, p in fronts if len(p) >= 2]
     return out
 
