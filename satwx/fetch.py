@@ -19,12 +19,27 @@ def pick_satellite(lon: float) -> str:
     return "goes18" if -180 <= lon < -106 or lon > 150 else "goes19"
 
 
-def fetch_tile(lat: float, lon: float, t: dt.datetime, satellite: str | None = None) -> tuple[np.ndarray, dict]:
-    """Tile centred on (lat, lon) from the full-disk scan nearest t. Reads only the needed byte ranges
-    (~2 MB per band) instead of downloading whole files."""
+def scan_band_keys(sat: str, t: dt.datetime | None) -> list[str]:
+    """One key per band, all from the same full-disk scan: the scan nearest t, or with t=None the newest
+    scan whose bands have all been published."""
+    if t is not None:
+        ref = goes.find_key(sat, "ABI-L2-CMIPF", t, "C13")
+        return [goes.find_key(sat, "ABI-L2-CMIPF", t, b, same_scan_as=ref) for b in goes.BANDS]
+    for ref in goes.recent_keys(sat, "ABI-L2-CMIPF", "C13")[:3]:
+        try:
+            return [goes.find_key(sat, "ABI-L2-CMIPF", goes.scan_start(ref), b, same_scan_as=ref) for b in goes.BANDS]
+        except FileNotFoundError:
+            continue  # newest scan still being published; try the previous one
+    raise FileNotFoundError(f"no complete recent full-disk scan found in {sat}")
+
+
+def fetch_tile(lat: float, lon: float, t: dt.datetime | None, satellite: str | None = None) -> tuple[np.ndarray, dict]:
+    """Tile centred on (lat, lon) from the full-disk scan nearest t (None: latest scan). Reads only the needed
+    byte ranges (~2 MB per band) instead of downloading whole files."""
+    if not (-90 <= lat <= 90 and -360 <= lon <= 360):
+        raise ValueError(f"invalid coordinates ({lat}, {lon})")
     sat = satellite or pick_satellite(lon)
-    ref = goes.find_key(sat, "ABI-L2-CMIPF", t, "C13")
-    keys = [goes.find_key(sat, "ABI-L2-CMIPF", t, b, same_scan_as=ref) for b in goes.BANDS]
+    keys = scan_band_keys(sat, t)
     bands = []
     for key in keys:
         with goes.open_remote(sat, key) as h:

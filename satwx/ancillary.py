@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from .goes import http
 
 IBTRACS_URL = ("https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/"
                "v04r01/access/csv/ibtracs.last3years.list.v04r01.csv")
@@ -19,7 +20,7 @@ def load_ibtracs(cache_dir: str | Path) -> pd.DataFrame:
     path = Path(cache_dir) / "ibtracs.last3years.csv"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(IBTRACS_URL, path)
+        path.write_bytes(http(IBTRACS_URL)[1])
     df = pd.read_csv(path, skiprows=[1], low_memory=False,
                      usecols=["SID", "NAME", "ISO_TIME", "NATURE", "LAT", "LON", "WMO_WIND", "USA_WIND"])
     df["ISO_TIME"] = pd.to_datetime(df["ISO_TIME"])
@@ -97,8 +98,7 @@ def fronts_at(t: dt.datetime, cache_dir: str | Path, max_offset_h: float = 1.6) 
         path.parent.mkdir(parents=True, exist_ok=True)
         s = (t - dt.timedelta(hours=t.hour)).strftime("%Y-%m-%dT00:00Z")
         e = (t - dt.timedelta(hours=t.hour) + dt.timedelta(hours=30)).strftime("%Y-%m-%dT06:00Z")
-        with urllib.request.urlopen(CODSUS_URL.format(s=s, e=e), timeout=60) as r:
-            path.write_bytes(r.read())
+        path.write_bytes(http(CODSUS_URL.format(s=s, e=e))[1])
     analyses = parse_codsus(path.read_text(errors="replace"))
     if not analyses:
         return None

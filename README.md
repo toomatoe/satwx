@@ -103,7 +103,7 @@ How to read these:
 
 ## Usage
 
-Everything runs in Docker (the host only needs Docker):
+With Docker (the host needs nothing else):
 
 ```bash
 docker build -t satwx .
@@ -114,11 +114,24 @@ docker run --rm satwx --lat 17.5 --lon -78.1 --time 2025-10-28T12:00
 ```
 
 ```bash
+docker run --rm satwx --lat 30 --lon -90 --time latest
+```
+
+```bash
 docker run --rm -v "$PWD:/work" satwx /work/tile.png --json
 ```
 
+Without Docker (Python 3.10+; the pinned CPU wheels in `requirements.txt` are for Linux and Windows, so on
+macOS install `torch`/`torchvision` from PyPI first):
+
+```bash
+pip install -r requirements.txt && pip install --no-deps -e .
+```
+
+The checkpoints are found in `models/` next to the package; set `SATWX_MODELS` to use another folder.
+
 Inputs:
-* `--lat --lon --time`: finds the nearest full-disk scan on `noaa-goes19` (or `noaa-goes18` west of
+* `--lat --lon --time` (`--time latest` uses the newest complete scan): finds the nearest full-disk scan on `noaa-goes19` (or `noaa-goes18` west of
   106°W). It reads only the bytes for the 256 km tile around the point with HTTP range requests (about 8 MB,
   10–20 s), and classifies it. All four bands come from the same scan. Points off the disk or too close
   to its edge are refused. Points beyond the training range (satellite zenith > 65°) get a warning in the
@@ -147,7 +160,15 @@ docker run --rm --entrypoint python -v "$PWD:/app" -w /app satwx scripts/train.p
 docker run --rm --entrypoint python -v "$PWD:/app" -w /app satwx scripts/train.py --out models/satwx_ir1.pt --channels C13
 ```
 
-Tests: `docker run --rm --entrypoint python satwx -m pytest -q tests`
+Score a checkpoint on any folder of tiles, for example one built with `build_dataset.py --satellite goes18`:
+
+```bash
+docker run --rm --entrypoint python -v "$PWD:/app" -w /app satwx scripts/evaluate.py --tiles data/tiles_goes18 --model models/satwx_ir4.pt
+```
+
+Tests: `docker run --rm --entrypoint python satwx -m pytest -q tests` (they also run on every push via GitHub
+Actions). Set `SATWX_NETWORK_TESTS=1` to include a test that compares a live range-read tile with a full
+download.
 
 Layout: `satwx/goes.py` (S3 access, fixed-grid projection, readers), `satwx/scene.py` (scene loading, tiling),
 `satwx/ancillary.py` (IBTrACS, WPC fronts), `satwx/labels.py` (rules), `satwx/model.py` (network, calibration),

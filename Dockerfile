@@ -1,7 +1,7 @@
 FROM python:3.12-slim
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchvision==0.20.1 \
- && pip install --no-cache-dir numpy==2.1.3 netCDF4==1.7.2 h5py==3.12.1 pandas==2.2.3 pillow==11.0.0 pytest==8.3.4
 WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY pyproject.toml README.md ./
 COPY satwx ./satwx
 COPY scripts ./scripts

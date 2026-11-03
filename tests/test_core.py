@@ -187,3 +187,38 @@ def test_split_has_gaps_around_held_out_blocks():
     assert day(0) == "train" and day(50) == "val" and day(70) == "test"
     assert day(46) == "gap" and day(81) == "gap"          # 2 days before val, 1 day after test
     assert day(40) == "train" and day(40, "_tc") == "gap"  # 8 days before val: ok for regular, not for TC scenes
+
+
+def test_parse_time_latest_and_utc():
+    from satwx.cli import parse_time
+
+    assert parse_time("latest") is None and parse_time("NOW") is None
+    assert parse_time("2025-09-26T14:00-04:00") == dt.datetime(2025, 9, 26, 18, 0)
+
+
+def test_fetch_rejects_invalid_coordinates():
+    from satwx.fetch import fetch_tile
+
+    with pytest.raises(ValueError):
+        fetch_tile(95.0, -80.0, dt.datetime(2025, 9, 26, 18))
+
+
+def test_http_retries_dropped_connections(monkeypatch):
+    import io as _io
+    import ssl
+    import urllib.request
+
+    calls = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(req)
+        if len(calls) < 3:
+            raise ssl.SSLEOFError("EOF occurred in violation of protocol")
+
+        class R(_io.BytesIO):
+            headers = {"Content-Length": "2"}
+        return R(b"ok")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(goes.time, "sleep", lambda s: None)
+    assert goes.http("https://example.invalid/x")[1] == b"ok" and len(calls) == 3

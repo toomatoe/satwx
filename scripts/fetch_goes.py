@@ -15,7 +15,7 @@ from satwx.fetch import bt_to_png, fetch_tile
 ap = argparse.ArgumentParser()
 ap.add_argument("--lat", type=float, required=True)
 ap.add_argument("--lon", type=float, required=True)
-ap.add_argument("--time", type=parse_time, required=True)
+ap.add_argument("--time", type=parse_time, required=True, help="UTC ISO 8601, or 'latest'")
 ap.add_argument("--satellite", choices=["goes18", "goes19"])
 ap.add_argument("--out", type=Path, required=True)
 a = ap.parse_args()

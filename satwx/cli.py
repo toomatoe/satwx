@@ -1,6 +1,7 @@
 """classify: weather-pattern probabilities for a GOES tile.
 
     classify --lat 25.5 --lon -80.2 --time 2025-09-26T18:00
+    classify --lat 25.5 --lon -80.2 --time latest
     classify tile.npy           # (4, 64, 64) C07/C08/C13/C15 brightness temperatures in K
     classify tile.png           # 8-bit greyscale 10.3um IR, white = cold (0 -> 330 K, 255 -> 170 K)
 """
@@ -16,9 +17,13 @@ from pathlib import Path
 import numpy as np
 
 MODEL_DIR = Path(os.environ.get("SATWX_MODELS", Path(__file__).resolve().parent.parent / "models"))
+_UNSET = object()  # --time not given (None means "latest")
 
 
-def parse_time(s: str) -> dt.datetime:
+def parse_time(s: str) -> dt.datetime | None:
+    """ISO 8601 -> naive UTC; 'latest' / 'now' -> None (newest available scan)."""
+    if s.lower() in ("latest", "now"):
+        return None
     t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
     return t.astimezone(dt.timezone.utc).replace(tzinfo=None) if t.tzinfo else t
 
@@ -28,7 +33,8 @@ def main(argv=None):
     ap.add_argument("image", nargs="?", type=Path, help=".png (IR greyscale) or .npy tile")
     ap.add_argument("--lat", type=float)
     ap.add_argument("--lon", type=float)
-    ap.add_argument("--time", type=parse_time, help="UTC, ISO 8601 (e.g. 2025-09-26T18:00)")
+    ap.add_argument("--time", type=parse_time, default=_UNSET,
+                    help="UTC, ISO 8601 (e.g. 2025-09-26T18:00), or 'latest'")
     ap.add_argument("--satellite", choices=["goes18", "goes19"], help="default: chosen from --lon")
     ap.add_argument("--model", type=Path, help="checkpoint (default: models/satwx_ir4.pt, or satwx_ir1.pt for PNG)")
     ap.add_argument("--save-tile", type=Path, help="with --lat/--lon/--time: also write the fetched tile (.npy or .png)")
@@ -47,12 +53,12 @@ def main(argv=None):
         else:
             x = png_to_bt(a.image)
         meta["input"] = str(a.image)
-    elif None not in (a.lat, a.lon, a.time):
+    elif a.lat is not None and a.lon is not None and a.time is not _UNSET:
         try:
             x, meta = fetch_tile(a.lat, a.lon, a.time, a.satellite)
-        except (ValueError, FileNotFoundError) as e:
+        except (ValueError, OSError) as e:  # OSError covers network failures and missing files
             ap.exit(2, f"classify: {e}\n")
-        meta.update(lat=a.lat, lon=a.lon, requested_time=a.time.isoformat())
+        meta.update(lat=a.lat, lon=a.lon, requested_time=a.time.isoformat() if a.time else "latest")
         if a.save_tile:
             np.save(a.save_tile, x) if a.save_tile.suffix == ".npy" else bt_to_png(x[2], a.save_tile)
     else:

@@ -9,6 +9,9 @@ import datetime as dt
 import io
 import os
 import re
+import ssl
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -27,6 +30,21 @@ FULL_DISK_2KM = 5424  # pixels per side of the 2 km full-disk grid
 BANDS = ("C07", "C08", "C13", "C15")
 
 
+def http(req: "str | urllib.request.Request", retries: int = 5) -> tuple[dict, bytes]:
+    """(headers, body) of an HTTP request, retrying dropped connections and 5xx with backoff."""
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return dict(r.headers), r.read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == retries - 1:
+                raise
+        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError):
+            if attempt == retries - 1:
+                raise
+        time.sleep(min(2 ** attempt, 20))
+
+
 def bucket(satellite: str) -> str:
     return f"https://noaa-{satellite}.s3.amazonaws.com"
 
@@ -37,8 +55,7 @@ def list_keys(satellite: str, prefix: str) -> list[str]:
         url = f"{bucket(satellite)}/?list-type=2&prefix={prefix}"
         if token:
             url += "&continuation-token=" + urllib.parse.quote(token)
-        with urllib.request.urlopen(url, timeout=60) as r:
-            root = ET.fromstring(r.read())
+        root = ET.fromstring(http(url)[1])
         keys += [c.find(S3_NS + "Key").text for c in root.iter(S3_NS + "Contents")]
         nxt = root.find(S3_NS + "NextContinuationToken")
         if nxt is None:
@@ -89,12 +106,19 @@ def keys_between(satellite: str, product: str, t0: dt.datetime, t1: dt.datetime)
     return [k for k in keys if t0 <= scan_start(k) < t1]
 
 
+def recent_keys(satellite: str, product: str, band: str, hours: int = 2) -> list[str]:
+    """Keys of `product`/`band` from the last `hours` hours, newest first."""
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    keys = keys_between(satellite, product, now - dt.timedelta(hours=hours), now + dt.timedelta(minutes=1))
+    return sorted((k for k in keys if f"{band}_" in k), key=scan_start, reverse=True)
+
+
 def download(satellite: str, key: str, cache_dir: str | os.PathLike) -> Path:
     out = Path(cache_dir) / Path(key).name
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".part")
-        urllib.request.urlretrieve(f"{bucket(satellite)}/{key}", tmp)
+        tmp.write_bytes(http(f"{bucket(satellite)}/{key}")[1])
         tmp.replace(out)
     return out
 
@@ -195,8 +219,7 @@ class RangeFile(io.RawIOBase):
 
     def __init__(self, url: str, block: int = 1 << 18):
         self.url, self.block, self.pos, self.cache = url, block, 0, {}
-        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
-            self.size = int(r.headers["Content-Length"])
+        self.size = int(http(urllib.request.Request(url, method="HEAD"))[0]["Content-Length"])
 
     def readable(self):
         return True
@@ -215,8 +238,7 @@ class RangeFile(io.RawIOBase):
         if i not in self.cache:
             lo, hi = i * self.block, min(self.size, (i + 1) * self.block) - 1
             req = urllib.request.Request(self.url, headers={"Range": f"bytes={lo}-{hi}"})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                self.cache[i] = r.read()
+            self.cache[i] = http(req)[1]
         return self.cache[i]
 
     def readinto(self, buf) -> int:
